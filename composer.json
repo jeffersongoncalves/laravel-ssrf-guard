@@ -1,0 +1,62 @@
+{
+    "name": "jeffersongoncalves/laravel-ssrf-guard",
+    "description": "A Laravel package that protects outbound HTTP requests from SSRF (Server-Side Request Forgery): it validates that a URL's host resolves only to public IPs (denying private, reserved, loopback and link-local ranges by default), pins the connection to the validated IP to close the DNS-rebinding TOCTOU window, and performs safe GET requests that re-validate every redirect hop.",
+    "keywords": [
+        "jeffersongoncalves",
+        "laravel",
+        "laravel-ssrf-guard"
+    ],
+    "homepage": "https://github.com/jeffersongoncalves/laravel-ssrf-guard",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Jefferson Gonçalves",
+            "email": "gerson.simao.92@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "spatie/laravel-package-tools": "^1.14.0"
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.0",
+        "orchestra/testbench": "^9.0|^10.0|^11.0",
+        "pestphp/pest": "^3.7.4|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "JeffersonGoncalves\\SsrfGuard\\": "src"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "JeffersonGoncalves\\SsrfGuard\\Tests\\": "tests"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": "@php ./vendor/bin/testbench package:discover --ansi",
+        "analyse": "vendor/bin/phpstan analyse",
+        "test": "vendor/bin/pest",
+        "test-coverage": "vendor/bin/pest --coverage",
+        "format": "vendor/bin/pint"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "phpstan/extension-installer": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "JeffersonGoncalves\\SsrfGuard\\SsrfGuardServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
