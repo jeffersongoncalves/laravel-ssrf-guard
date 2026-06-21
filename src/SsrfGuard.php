@@ -15,6 +15,12 @@ use JeffersonGoncalves\SsrfGuard\Exceptions\BlockedHostException;
  * DNS-rebinding (TOCTOU) window: without it the host would be resolved once for
  * validation and again at connect time, letting an attacker-controlled domain
  * flip to an internal IP between the two lookups.
+ *
+ * safeRequest()/safeGet() take this one step further: curl's own redirect
+ * following is disabled and every redirect hop is followed manually so that
+ * EACH hop is re-resolved, re-validated and re-pinned. A public host that 302s
+ * to 169.254.169.254/localhost is therefore still blocked — curl never resolves
+ * a redirect target on its own.
  */
 class SsrfGuard
 {
@@ -44,15 +50,23 @@ class SsrfGuard
             return null;
         }
 
+        // parse_url keeps IPv6 literals bracketed (host === "[::1]"). Strip the
+        // brackets BEFORE any filter_var(... FILTER_VALIDATE_IP) check, otherwise
+        // legitimate public IPv6 literals fail the IP test and fall through to a
+        // hostname lookup that can never succeed.
         $host = $parts['host'];
+        $bareHost = (str_starts_with($host, '[') && str_ends_with($host, ']'))
+            ? substr($host, 1, -1)
+            : $host;
+
         $port = $parts['port'] ?? ($scheme === 'https' ? 443 : 80);
 
-        if (filter_var($host, FILTER_VALIDATE_IP)) {
-            $ips = [$host];
+        if (filter_var($bareHost, FILTER_VALIDATE_IP)) {
+            $ips = [$bareHost];
         } else {
-            $ips = gethostbynamel($host) ?: [];
+            $ips = gethostbynamel($bareHost) ?: [];
 
-            foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $record) {
+            foreach (@dns_get_record($bareHost, DNS_AAAA) ?: [] as $record) {
                 if (isset($record['ipv6'])) {
                     $ips[] = $record['ipv6'];
                 }
@@ -65,15 +79,13 @@ class SsrfGuard
 
         if (! $this->allowPrivate()) {
             foreach ($ips as $ip) {
-                if (! filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                if (! $this->isPublicIp($ip)) {
                     return null;
                 }
             }
         }
 
         // Pin to the first validated IP. curl needs the bare host (no brackets).
-        $bareHost = trim($host, '[]');
-
         return ["{$bareHost}:{$port}:{$ips[0]}"];
     }
 
@@ -87,46 +99,291 @@ class SsrfGuard
     }
 
     /**
-     * Perform a GET request that is safe against SSRF: the connection is pinned
-     * to the validated public IP (CURLOPT_RESOLVE) and every redirect hop is
-     * re-validated against the same public-IP guard.
+     * Decide whether a single resolved IP address is a public, routable address
+     * safe to connect to.
      *
-     * Throws BlockedHostException when the URL — or any redirect hop reached
-     * while following one — is not public.
+     * This is intentionally stricter than PHP's filter flags alone:
      *
-     * @param  array<string, mixed>  $options  extra Guzzle/Http options, merged over the safe defaults
+     *  - IPv4-mapped/compatible/NAT64 IPv6 literals (e.g. `::ffff:127.0.0.1`,
+     *    `::ffff:169.254.169.254`, `64:ff9b::7f00:1`) wrap an IPv4 address that
+     *    PHP's NO_PRIV_RANGE|NO_RES_RANGE flags evaluate as "public". They are
+     *    pure obfuscation vectors, so any IPv6 literal that embeds an IPv4
+     *    address is rejected outright.
+     *  - An explicit CIDR deny-list closes ranges the PHP flags miss entirely:
+     *    CGNAT, IETF protocol assignments, benchmarking ranges, IPv6 ULA/
+     *    link-local, loopback and the unspecified address.
+     */
+    public function isPublicIp(string $ip): bool
+    {
+        $packed = @inet_pton($ip);
+
+        if ($packed === false) {
+            return false;
+        }
+
+        // IPv6 literal (16 bytes): reject anything that wraps an IPv4 address.
+        if (strlen($packed) === 16 && $this->wrapsIpv4($packed)) {
+            return false;
+        }
+
+        // Cheap PHP-filter gate for the bulk of private/reserved ranges.
+        if (! filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            return false;
+        }
+
+        // Explicit deny-list for ranges PHP's flags do not cover.
+        foreach ($this->deniedCidrs() as $cidr) {
+            if ($this->ipInCidr($packed, $cidr)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Perform a GET request that is safe against SSRF. Thin wrapper over
+     * safeRequest() for the common case.
+     *
+     * @param  array<string, mixed>  $options  extra Guzzle/Http options, merged UNDER the safe defaults
      *
      * @throws BlockedHostException
      */
     public function safeGet(string $url, array $options = []): Response
     {
-        $resolve = $this->resolveEntries($url);
+        return $this->safeRequest('GET', $url, $options);
+    }
 
-        if ($resolve === null) {
-            throw BlockedHostException::forUrl($url);
+    /**
+     * Perform an arbitrary-method request (GET/POST/PUT/PATCH/DELETE/HEAD) that
+     * is safe against SSRF.
+     *
+     * The connection is pinned to the validated public IP (CURLOPT_RESOLVE) and
+     * curl's own redirect following is disabled. Redirects are followed manually
+     * so EACH hop is independently parsed, resolved, validated and re-pinned —
+     * curl never resolves a redirect target itself, closing the DNS-rebinding
+     * window on every hop.
+     *
+     * Throws BlockedHostException when the URL — or any redirect hop reached
+     * while following one — is not public, or when the redirect limit is hit.
+     *
+     * @param  array<string, mixed>  $options  extra Guzzle/Http options, merged UNDER the safe defaults
+     *
+     * @throws BlockedHostException
+     */
+    public function safeRequest(string $method, string $url, array $options = []): Response
+    {
+        $method = strtoupper($method);
+        $currentUrl = $url;
+        $maxRedirects = $this->maxRedirects();
+
+        for ($hop = 0; ; $hop++) {
+            // Re-resolve, re-validate and re-pin THIS host on every hop.
+            $resolve = $this->resolveEntries($currentUrl);
+
+            if ($resolve === null) {
+                throw $hop === 0
+                    ? BlockedHostException::forUrl($url)
+                    : BlockedHostException::forRedirect($currentUrl);
+            }
+
+            $response = Http::timeout($this->timeout())
+                ->withOptions($this->buildOptions($resolve, $options))
+                ->send($method, $currentUrl);
+
+            if (! $this->isRedirectStatus($response->status())) {
+                return $response;
+            }
+
+            $location = trim((string) $response->header('Location'));
+
+            if ($location === '') {
+                // A 3xx with no Location header — nothing to follow.
+                return $response;
+            }
+
+            if ($hop >= $maxRedirects) {
+                throw BlockedHostException::tooManyRedirects($url);
+            }
+
+            [$method, $options] = $this->adjustForRedirect($response->status(), $method, $options);
+            $currentUrl = $this->resolveLocation($currentUrl, $location);
+        }
+    }
+
+    /**
+     * Build the per-hop Http/Guzzle options. Security-critical keys are forced
+     * ON TOP of any caller-supplied options so a caller can never disable the
+     * protection by passing allow_redirects/curl overrides — caller options are
+     * merged UNDER these keys, not over them.
+     *
+     * @param  list<string>  $resolve
+     * @param  array<string, mixed>  $callerOptions
+     * @return array<string, mixed>
+     */
+    protected function buildOptions(array $resolve, array $callerOptions): array
+    {
+        $merged = $callerOptions;
+
+        // Never let Guzzle auto-follow: redirects are handled manually so each
+        // hop is re-resolved and re-pinned.
+        $merged['allow_redirects'] = false;
+
+        $curl = (isset($merged['curl']) && is_array($merged['curl'])) ? $merged['curl'] : [];
+
+        // Pin the host to the validated IP and belt-and-braces disable curl's
+        // own redirect following.
+        $curl[CURLOPT_RESOLVE] = $resolve;
+        $curl[CURLOPT_FOLLOWLOCATION] = false;
+
+        $merged['curl'] = $curl;
+
+        return $merged;
+    }
+
+    /**
+     * Adjust method/body when following a redirect, mirroring browser/RFC
+     * semantics: 303 (and 301/302 from an unsafe method) downgrade to GET and
+     * drop the request body; 307/308 preserve method and body.
+     *
+     * @param  array<string, mixed>  $options
+     * @return array{0: string, 1: array<string, mixed>}
+     */
+    protected function adjustForRedirect(int $status, string $method, array $options): array
+    {
+        $downgrade = $status === 303
+            || (in_array($status, [301, 302], true) && ! in_array($method, ['GET', 'HEAD'], true));
+
+        if ($downgrade) {
+            $method = 'GET';
+            unset($options['body'], $options['json'], $options['form_params'], $options['multipart']);
         }
 
-        $defaults = [
-            // Follow redirects but re-validate every hop: the CURLOPT_RESOLVE
-            // pin only covers the first host, so without this a public host
-            // could 302 to 169.254.169.254/localhost and defeat the IP guard.
-            'allow_redirects' => [
-                'max' => $this->maxRedirects(),
-                'strict' => true,
-                'referer' => false,
-                'protocols' => $this->allowedSchemes(),
-                'on_redirect' => function ($request, $response, $uri): void {
-                    if ($this->resolveEntries((string) $uri) === null) {
-                        throw BlockedHostException::forRedirect((string) $uri);
-                    }
-                },
-            ],
-            'curl' => [CURLOPT_RESOLVE => $resolve],
-        ];
+        return [$method, $options];
+    }
 
-        return Http::timeout($this->timeout())
-            ->withOptions(array_replace_recursive($defaults, $options))
-            ->get($url);
+    /**
+     * Resolve a (possibly relative) Location header against the current URL into
+     * an absolute URL the next hop can re-validate.
+     */
+    protected function resolveLocation(string $base, string $location): string
+    {
+        // Absolute URL with an explicit scheme.
+        if (preg_match('#^[a-z][a-z0-9+.\-]*://#i', $location) === 1) {
+            return $location;
+        }
+
+        $baseParts = parse_url($base);
+        $scheme = isset($baseParts['scheme']) ? strtolower($baseParts['scheme']) : 'http';
+
+        // Scheme-relative: //host/path
+        if (str_starts_with($location, '//')) {
+            return $scheme.':'.$location;
+        }
+
+        $host = $baseParts['host'] ?? '';
+        $authority = $scheme.'://'.$host.(isset($baseParts['port']) ? ':'.$baseParts['port'] : '');
+
+        // Absolute path.
+        if (str_starts_with($location, '/')) {
+            return $authority.$location;
+        }
+
+        // Relative path — resolve against the directory of the base path.
+        $basePath = $baseParts['path'] ?? '/';
+        $slash = strrpos($basePath, '/');
+        $dir = $slash === false ? '/' : substr($basePath, 0, $slash + 1);
+
+        return $authority.$dir.$location;
+    }
+
+    protected function isRedirectStatus(int $status): bool
+    {
+        return in_array($status, [301, 302, 303, 307, 308], true);
+    }
+
+    /**
+     * Does a 16-byte packed IPv6 address embed an IPv4 address (mapped,
+     * compatible or NAT64)? Such literals are obfuscation vectors and are
+     * rejected; the bare `::` and `::1` are left to the explicit CIDR deny-list.
+     */
+    protected function wrapsIpv4(string $packed): bool
+    {
+        // IPv4-mapped ::ffff:0:0/96
+        if (substr($packed, 0, 10) === str_repeat("\x00", 10) && substr($packed, 10, 2) === "\xff\xff") {
+            return true;
+        }
+
+        // NAT64 64:ff9b::/96
+        if (substr($packed, 0, 12) === "\x00\x64\xff\x9b".str_repeat("\x00", 8)) {
+            return true;
+        }
+
+        // IPv4-compatible ::/96 (deprecated): first 12 bytes zero, last 4 a real
+        // IPv4 address. Exclude :: (0.0.0.0) and ::1 (loopback).
+        if (substr($packed, 0, 12) === str_repeat("\x00", 12)) {
+            $last4 = substr($packed, 12, 4);
+
+            if ($last4 !== "\x00\x00\x00\x00" && $last4 !== "\x00\x00\x00\x01") {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Explicit CIDR deny-list for ranges PHP's FILTER_FLAG_* do not cover.
+     *
+     * @return list<string>
+     */
+    protected function deniedCidrs(): array
+    {
+        return [
+            // IPv4
+            '0.0.0.0/8',        // "this" network
+            '100.64.0.0/10',    // CGNAT (RFC 6598)
+            '169.254.0.0/16',   // link-local incl. cloud metadata 169.254.169.254
+            '192.0.0.0/24',     // IETF protocol assignments (RFC 6890)
+            '198.18.0.0/15',    // benchmarking (RFC 2544)
+            // IPv6
+            '::/128',           // unspecified
+            '::1/128',          // loopback
+            'fc00::/7',         // unique local address
+            'fe80::/10',        // link-local
+        ];
+    }
+
+    /**
+     * Test a packed IP (4 or 16 bytes from inet_pton) against a CIDR string,
+     * for both address families.
+     */
+    protected function ipInCidr(string $packed, string $cidr): bool
+    {
+        [$subnet, $bitsStr] = explode('/', $cidr);
+        $subnetPacked = @inet_pton($subnet);
+
+        if ($subnetPacked === false || strlen($subnetPacked) !== strlen($packed)) {
+            return false;
+        }
+
+        $bits = (int) $bitsStr;
+        $wholeBytes = intdiv($bits, 8);
+        $remainder = $bits % 8;
+
+        if ($wholeBytes > 0 && substr($packed, 0, $wholeBytes) !== substr($subnetPacked, 0, $wholeBytes)) {
+            return false;
+        }
+
+        if ($remainder !== 0) {
+            $mask = chr((0xFF << (8 - $remainder)) & 0xFF);
+
+            if ((substr($packed, $wholeBytes, 1) & $mask) !== (substr($subnetPacked, $wholeBytes, 1) & $mask)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     protected function timeout(): int
@@ -136,7 +393,7 @@ class SsrfGuard
 
     protected function maxRedirects(): int
     {
-        return (int) config('ssrf-guard.max_redirects', 3);
+        return (int) config('ssrf-guard.max_redirects', 5);
     }
 
     /**

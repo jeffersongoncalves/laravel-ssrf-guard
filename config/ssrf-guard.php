@@ -18,12 +18,13 @@ return [
     | Maximum Redirects
     |--------------------------------------------------------------------------
     |
-    | How many redirect hops safeGet() will follow. EVERY hop is re-validated
-    | against the public-IP guard, so a public host that 302s to an internal
-    | address (e.g. 169.254.169.254 / localhost) is still blocked.
+    | How many redirect hops safeGet()/safeRequest() will follow. Redirects are
+    | followed MANUALLY: every hop is independently re-resolved, re-validated and
+    | re-pinned (curl never follows a redirect itself), so a public host that
+    | 302s to an internal address (e.g. 169.254.169.254 / localhost) is blocked.
     |
     */
-    'max_redirects' => (int) env('SSRF_GUARD_MAX_REDIRECTS', 3),
+    'max_redirects' => (int) env('SSRF_GUARD_MAX_REDIRECTS', 5),
 
     /*
     |--------------------------------------------------------------------------

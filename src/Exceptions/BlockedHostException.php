@@ -20,4 +20,9 @@ class BlockedHostException extends RuntimeException
     {
         return new self("SSRF guard blocked a redirect to a non-public host: {$url}");
     }
+
+    public static function tooManyRedirects(string $url): self
+    {
+        return new self("SSRF guard aborted a request that exceeded the redirect limit: {$url}");
+    }
 }
