@@ -5,6 +5,7 @@ namespace JeffersonGoncalves\SsrfGuard;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use JeffersonGoncalves\SsrfGuard\Exceptions\BlockedHostException;
+use JeffersonGoncalves\SsrfGuard\Exceptions\ResponseTooLargeException;
 
 /**
  * Guards outbound HTTP requests against SSRF (Server-Side Request Forgery).
@@ -59,6 +60,17 @@ class SsrfGuard
             ? substr($host, 1, -1)
             : $host;
 
+        // Defence in depth against parse_url()/curl divergence: reject any host
+        // carrying characters that could make curl re-parse the authority into a
+        // different target than the one validated here (userinfo "@", path or
+        // authority delimiters "/", "\\", "?", "#", whitespace and control
+        // bytes). Combined with rebuildUrl() — which strips userinfo before the
+        // request is sent — this guarantees curl connects to exactly the host
+        // pinned by CURLOPT_RESOLVE.
+        if (! $this->isValidHostSyntax($bareHost)) {
+            return null;
+        }
+
         $port = $parts['port'] ?? ($scheme === 'https' ? 443 : 80);
 
         if (filter_var($bareHost, FILTER_VALIDATE_IP)) {
@@ -85,8 +97,32 @@ class SsrfGuard
             }
         }
 
-        // Pin to the first validated IP. curl needs the bare host (no brackets).
-        return ["{$bareHost}:{$port}:{$ips[0]}"];
+        // Pin to the first validated IP. CURLOPT_RESOLVE uses a
+        // `HOST:PORT:ADDRESS` syntax in which IPv6 literals MUST be bracketed —
+        // both for the host field (when the URL itself is an IPv6 literal) and
+        // for the address field. Without the brackets curl silently ignores the
+        // entry, which would disable the DNS-rebinding pin for AAAA-only hosts.
+        $ip = $ips[0];
+        $hostField = $this->isIpv6($bareHost) ? "[{$bareHost}]" : $bareHost;
+        $ipField = $this->isIpv6($ip) ? "[{$ip}]" : $ip;
+
+        return ["{$hostField}:{$port}:{$ipField}"];
+    }
+
+    /**
+     * Strict syntax gate for the (already de-bracketed) host extracted by
+     * parse_url(). Only the byte set valid for a hostname or a bare IP literal
+     * is accepted; everything else is rejected so curl can never re-parse the
+     * authority into a different connect target.
+     */
+    protected function isValidHostSyntax(string $host): bool
+    {
+        return $host !== '' && preg_match('/^[A-Za-z0-9._:\-]+$/', $host) === 1;
+    }
+
+    protected function isIpv6(string $value): bool
+    {
+        return filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
     }
 
     /**
@@ -187,9 +223,22 @@ class SsrfGuard
                     : BlockedHostException::forRedirect($currentUrl);
             }
 
+            // Send a URL rebuilt from the validated parse_url() components, with
+            // userinfo and fragment stripped, so curl cannot re-parse a raw,
+            // ambiguous authority into a host other than the one pinned above.
+            $safeUrl = $this->rebuildUrl($currentUrl);
+
+            if ($safeUrl === null) {
+                throw $hop === 0
+                    ? BlockedHostException::forUrl($url)
+                    : BlockedHostException::forRedirect($currentUrl);
+            }
+
             $response = Http::timeout($this->timeout())
                 ->withOptions($this->buildOptions($resolve, $options))
-                ->send($method, $currentUrl);
+                ->send($method, $safeUrl);
+
+            $this->enforceResponseSize($response, $currentUrl);
 
             if (! $this->isRedirectStatus($response->status())) {
                 return $response;
@@ -303,6 +352,79 @@ class SsrfGuard
     }
 
     /**
+     * Rebuild an absolute http(s) URL from its validated parse_url() components,
+     * dropping the userinfo (`user:pass@`) and the fragment. This strips the raw,
+     * potentially ambiguous authority that curl might otherwise re-parse into a
+     * different connect target than the host pinned by CURLOPT_RESOLVE (the
+     * classic `http://public.com@169.254.169.254/` confusion). The IPv6 brackets
+     * kept by parse_url() in the host are preserved because a URL requires them.
+     * Returns null when the URL cannot be reduced to a usable scheme + host that
+     * passes the same strict host-syntax gate used during validation.
+     */
+    protected function rebuildUrl(string $url): ?string
+    {
+        $parts = parse_url($url);
+
+        if ($parts === false || ! isset($parts['scheme'], $parts['host'])) {
+            return null;
+        }
+
+        $scheme = strtolower($parts['scheme']);
+        $host = $parts['host'];
+
+        $bareHost = (str_starts_with($host, '[') && str_ends_with($host, ']'))
+            ? substr($host, 1, -1)
+            : $host;
+
+        if (! $this->isValidHostSyntax($bareHost)) {
+            return null;
+        }
+
+        $rebuilt = $scheme.'://'.$host;
+
+        if (isset($parts['port'])) {
+            $rebuilt .= ':'.$parts['port'];
+        }
+
+        $rebuilt .= $parts['path'] ?? '';
+
+        if (isset($parts['query'])) {
+            $rebuilt .= '?'.$parts['query'];
+        }
+
+        return $rebuilt;
+    }
+
+    /**
+     * Abort if a response body exceeds the configured size cap. A cap of 0 (or a
+     * negative value) disables the check. Both the advertised Content-Length and
+     * the actual downloaded body length are tested, so neither a lying nor an
+     * absent header can slip a large internal resource past the limit. Streaming
+     * a big internal file back through your worker is both a DoS and an
+     * exfiltration vector, hence the deny-once-exceeded posture.
+     *
+     * @throws ResponseTooLargeException
+     */
+    protected function enforceResponseSize(Response $response, string $url): void
+    {
+        $cap = $this->maxResponseSize();
+
+        if ($cap <= 0) {
+            return;
+        }
+
+        $contentLength = $response->header('Content-Length');
+
+        if ($contentLength !== '' && is_numeric($contentLength) && (int) $contentLength > $cap) {
+            throw ResponseTooLargeException::forUrl($url, $cap);
+        }
+
+        if (strlen($response->body()) > $cap) {
+            throw ResponseTooLargeException::forUrl($url, $cap);
+        }
+    }
+
+    /**
      * Does a 16-byte packed IPv6 address embed an IPv4 address (mapped,
      * compatible or NAT64)? Such literals are obfuscation vectors and are
      * rejected; the bare `::` and `::1` are left to the explicit CIDR deny-list.
@@ -394,6 +516,11 @@ class SsrfGuard
     protected function maxRedirects(): int
     {
         return (int) config('ssrf-guard.max_redirects', 5);
+    }
+
+    protected function maxResponseSize(): int
+    {
+        return (int) config('ssrf-guard.max_response_size', 10 * 1024 * 1024);
     }
 
     /**

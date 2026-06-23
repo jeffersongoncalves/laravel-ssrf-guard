@@ -38,9 +38,10 @@ This is the published config file:
 ```php
 return [
     'timeout' => (int) env('SSRF_GUARD_TIMEOUT', 8),
-    'max_redirects' => (int) env('SSRF_GUARD_MAX_REDIRECTS', 3),
+    'max_redirects' => (int) env('SSRF_GUARD_MAX_REDIRECTS', 5),
     'allowed_schemes' => ['http', 'https'],
     'allow_private' => (bool) env('SSRF_GUARD_ALLOW_PRIVATE', false),
+    'max_response_size' => (int) env('SSRF_GUARD_MAX_RESPONSE_SIZE', 10 * 1024 * 1024),
 ];
 ```
 
@@ -96,6 +97,8 @@ $response = app(SsrfGuard::class)->safeGet($url, [
 ]);
 ```
 
+`safeGet()`/`safeRequest()` also cap the response body at `max_response_size` (10 MiB by default), throwing `JeffersonGoncalves\SsrfGuard\Exceptions\ResponseTooLargeException` when an internal resource is larger than the cap — both the advertised `Content-Length` and the actual downloaded length are checked. Set the cap to `0` to disable it.
+
 > [!IMPORTANT]
 > `safeGet()` guarantees the **transport** is not pointed at an internal host. It does not validate the **response body**. If you re-serve fetched content from your own origin (images, HTML), still validate the `Content-Type` and sanitize/transform the body to avoid stored XSS.
 
@@ -113,9 +116,10 @@ $resolve = app(SsrfGuard::class)->resolveEntries('https://example.com');
 | Key | Default | Description |
 |-----|---------|-------------|
 | `timeout` | `8` | Maximum seconds a `safeGet()` request may run. |
-| `max_redirects` | `3` | How many redirect hops to follow — each one is re-validated. |
+| `max_redirects` | `5` | How many redirect hops to follow — each one is re-validated. |
 | `allowed_schemes` | `['http', 'https']` | Schemes considered valid; everything else is rejected. |
 | `allow_private` | `false` | **DANGER** — when `true`, skips the private/reserved/loopback/link-local check. For local development only; never enable in production. |
+| `max_response_size` | `10485760` (10 MiB) | Maximum response body size in bytes; larger responses throw `ResponseTooLargeException`. Set to `0` to disable. |
 
 ## Testing
 

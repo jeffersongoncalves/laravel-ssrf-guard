@@ -50,4 +50,19 @@ return [
     |
     */
     'allow_private' => (bool) env('SSRF_GUARD_ALLOW_PRIVATE', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Maximum Response Size
+    |--------------------------------------------------------------------------
+    |
+    | Maximum number of bytes a guarded response body (safeGet()/safeRequest())
+    | may contain before it is rejected with a ResponseTooLargeException. Both the
+    | advertised Content-Length header and the actual downloaded length are
+    | checked. Streaming a large internal resource back through your worker is a
+    | DoS and exfiltration vector, so keep this bounded. Set to 0 to disable the
+    | cap. Defaults to 10 MiB.
+    |
+    */
+    'max_response_size' => (int) env('SSRF_GUARD_MAX_RESPONSE_SIZE', 10 * 1024 * 1024),
 ];
