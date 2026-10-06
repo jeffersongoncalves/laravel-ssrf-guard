@@ -1,6 +1,6 @@
 <div class="filament-hidden">
 
-![Laravel SSRF Guard](https://raw.githubusercontent.com/jeffersongoncalves/laravel-ssrf-guard/master/art/jeffersongoncalves-laravel-ssrf-guard.png)
+![Laravel SSRF Guard](https://raw.githubusercontent.com/jeffersongoncalves/laravel-ssrf-guard/main/art/jeffersongoncalves-laravel-ssrf-guard.png)
 
 </div>
 
@@ -9,8 +9,8 @@
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/jeffersongoncalves)
 
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/jeffersongoncalves/laravel-ssrf-guard.svg?style=flat-square)](https://packagist.org/packages/jeffersongoncalves/laravel-ssrf-guard)
-[![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/jeffersongoncalves/laravel-ssrf-guard/tests.yml?branch=master&label=tests&style=flat-square)](https://github.com/jeffersongoncalves/laravel-ssrf-guard/actions?query=workflow%3Arun-tests+branch%3Amaster)
-[![GitHub Code Style Action Status](https://img.shields.io/github/actions/workflow/status/jeffersongoncalves/laravel-ssrf-guard/fix-php-code-style-issues.yml?branch=master&label=code%20style&style=flat-square)](https://github.com/jeffersongoncalves/laravel-ssrf-guard/actions?query=workflow%3A"Fix+PHP+code+styling"+branch%3Amaster)
+[![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/jeffersongoncalves/laravel-ssrf-guard/tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/jeffersongoncalves/laravel-ssrf-guard/actions?query=workflow%3Arun-tests+branch%3Amain)
+[![GitHub Code Style Action Status](https://img.shields.io/github/actions/workflow/status/jeffersongoncalves/laravel-ssrf-guard/fix-php-code-style-issues.yml?branch=main&label=code%20style&style=flat-square)](https://github.com/jeffersongoncalves/laravel-ssrf-guard/actions?query=workflow%3A"Fix+PHP+code+styling"+branch%3Amain)
 [![Total Downloads](https://img.shields.io/packagist/dt/jeffersongoncalves/laravel-ssrf-guard.svg?style=flat-square)](https://packagist.org/packages/jeffersongoncalves/laravel-ssrf-guard)
 
 Whenever your application fetches a URL that came from a user — an avatar URL, a webhook target, a link preview, an imported `og:image` — it can be tricked into reaching **internal** services instead: `http://localhost`, `http://10.0.0.1`, or the cloud metadata endpoint `http://169.254.169.254`. That is **Server-Side Request Forgery (SSRF)**.
