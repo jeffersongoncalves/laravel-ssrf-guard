@@ -100,6 +100,17 @@ it('blocks known SSRF bypass payloads', function (string $url) {
     'IPv4-mapped IPv6 loopback' => 'http://[::ffff:127.0.0.1]',
     'IPv4-mapped IPv6 metadata' => 'http://[::ffff:169.254.169.254]',
     'NAT64 metadata' => 'http://[64:ff9b::a9fe:a9fe]',
+    'IPv4-translated loopback' => 'http://[::ffff:0:7f00:1]',
+    'IPv4-translated metadata' => 'http://[::ffff:0:a9fe:a9fe]',
+    'NAT64 local-use loopback' => 'http://[64:ff9b:1::7f00:1]',
+    'NAT64 local-use metadata' => 'http://[64:ff9b:1::a9fe:a9fe]',
+    '6to4 loopback' => 'http://[2002:7f00:1::1]',
+    '6to4 metadata' => 'http://[2002:a9fe:a9fe::1]',
+    'Teredo loopback' => 'http://[2001::80ff:fffe]',
+    'Teredo metadata' => 'http://[2001::5601:5601]',
+    'ISATAP loopback' => 'http://[2001:4860:4860::5efe:7f00:1]',
+    'ISATAP private' => 'http://[2606:4700:4700::5efe:c0a8:1]',
+    'ISATAP u/l bit metadata' => 'http://[2001:4860:4860:0:200:5efe:a9fe:a9fe]',
     'cloud metadata link-local' => 'http://169.254.169.254',
     'CGNAT range' => 'http://100.64.1.1',
     'IETF protocol assignment' => 'http://192.0.0.1',
@@ -109,7 +120,8 @@ it('blocks known SSRF bypass payloads', function (string $url) {
 it('allows a legitimate public IPv6 literal (brackets stripped before the IP check)', function () {
     // 2606:4700:4700::1111 is Cloudflare public DNS; no network lookup needed
     // for an IP literal, so this is deterministic.
-    expect($this->guard->isPublicUrl('http://[2606:4700:4700::1111]'))->toBeTrue();
+    expect($this->guard->isPublicUrl('http://[2606:4700:4700::1111]'))->toBeTrue()
+        ->and($this->guard->isPublicUrl('http://[2001:4860:4860::8888]'))->toBeTrue();
 });
 
 it('pins a public IPv6 literal in the resolve entry with brackets on both host and address', function () {

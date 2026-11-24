@@ -143,8 +143,11 @@ class SsrfGuard
      *  - IPv4-mapped/compatible/NAT64 IPv6 literals (e.g. `::ffff:127.0.0.1`,
      *    `::ffff:169.254.169.254`, `64:ff9b::7f00:1`) wrap an IPv4 address that
      *    PHP's NO_PRIV_RANGE|NO_RES_RANGE flags evaluate as "public". They are
-     *    pure obfuscation vectors, so any IPv6 literal that embeds an IPv4
-     *    address is rejected outright.
+     *    pure obfuscation vectors, so IPv6 literals using a well-known IPv4
+     *    embedding (mapped, compatible, translated, NAT64 well-known and
+     *    local-use, 6to4, Teredo, ISATAP) are rejected outright. Operator-chosen
+     *    NAT64 prefixes (RFC 6052 network-specific) cannot be enumerated and
+     *    are NOT covered.
      *  - An explicit CIDR deny-list closes ranges the PHP flags miss entirely:
      *    CGNAT, IETF protocol assignments, benchmarking ranges, IPv6 ULA/
      *    link-local, loopback and the unspecified address.
@@ -426,7 +429,8 @@ class SsrfGuard
 
     /**
      * Does a 16-byte packed IPv6 address embed an IPv4 address (mapped,
-     * compatible or NAT64)? Such literals are obfuscation vectors and are
+     * compatible, NAT64 or ISATAP)? Prefix-based embeddings (translated, NAT64
+     * local-use, Teredo, 6to4) live in deniedCidrs(). Such literals are obfuscation vectors and are
      * rejected; the bare `::` and `::1` are left to the explicit CIDR deny-list.
      */
     protected function wrapsIpv4(string $packed): bool
@@ -438,6 +442,14 @@ class SsrfGuard
 
         // NAT64 64:ff9b::/96
         if (substr($packed, 0, 12) === "\x00\x64\xff\x9b".str_repeat("\x00", 8)) {
+            return true;
+        }
+
+        // ISATAP (RFC 5214): interface identifier 0000:5efe or 0200:5efe (u/l
+        // bit set) followed by the embedded IPv4, under ANY /64 prefix.
+        $iid = substr($packed, 8, 4);
+
+        if ($iid === "\x00\x00\x5e\xfe" || $iid === "\x02\x00\x5e\xfe") {
             return true;
         }
 
@@ -473,6 +485,11 @@ class SsrfGuard
             '::1/128',          // loopback
             'fc00::/7',         // unique local address
             'fe80::/10',        // link-local
+            // IPv6 transition mechanisms that embed an IPv4 address
+            '::ffff:0:0:0/96',  // IPv4-translated (RFC 2765)
+            '64:ff9b:1::/48',   // NAT64 local-use (RFC 8215)
+            '2001::/32',        // Teredo (RFC 4380)
+            '2002::/16',        // 6to4 (RFC 3056)
         ];
     }
 
